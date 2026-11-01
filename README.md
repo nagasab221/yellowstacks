@@ -56,10 +56,32 @@ Android SDK.
 | `yellowstacks settings` | Open the settings |
 | `yellowstacks edit` | Open the keyboard-controls editor |
 | `yellowstacks stop` | Shut Android down properly and close everything |
+| `yellowstacks customize` | Strip Android back to what games need (see below) |
 
 While playing: `` ` `` turns the controls on and off, `F11` is full screen,
 `Ctrl+V` pastes your PC clipboard into Android, and `Enter` presses OK when a
 game asks you to type.
+
+## A clean Android
+
+`yellowstacks customize` makes the virtual phone feel like part of Yellowstacks
+instead of a stock phone:
+
+- **Removes about 50 apps** it has no use for — Gmail, Maps, Photos, Chrome,
+  YouTube, the clock, the camera, printing and the rest. They are removed for
+  the single user, so `/system` is never touched and nothing can break.
+- **Dark mode**, faster animations, no notification pop-ups over a game, no
+  system sounds or vibration, no lock screen.
+- **A Yellowstacks wallpaper** generated at your screen's resolution.
+
+Everything is reversible:
+
+```bash
+yellowstacks customize --restore    # puts the removed apps back
+```
+
+The wallpaper appears after the next restart, because Android only reads it
+when it starts. `setup-avd.sh` runs this for you on a freshly built phone.
 
 ## Requirements
 

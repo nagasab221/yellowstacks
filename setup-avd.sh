@@ -133,3 +133,7 @@ for _ in $(seq 1 60); do kill -0 "$EMU" 2>/dev/null || break; sleep 2; done
 kill -0 "$EMU" 2>/dev/null && "$ADB" emu kill >/dev/null 2>&1 || true
 wait "$EMU" 2>/dev/null || true
 echo done
+
+# strip the new phone back to what games need (removable apps, dark mode, wallpaper)
+"$(dirname "$(readlink -f "$0")")/.venv/bin/python" \
+  "$(dirname "$(readlink -f "$0")")/yellowstacks.py" customize || true

@@ -28,6 +28,9 @@ clipboard. ` turns the controls on/off, F11 toggles full screen.
   yellowstacks.py settings [--page P]  the settings, without Android running
   yellowstacks.py open     PACKAGE     open an app in the running Android
   yellowstacks.py setup    [--profile mlbb]   just the controls editor
+  yellowstacks.py customize [--restore]   strip Android back to what games need:
+                           remove the apps it doesn't use, dark mode, Yellowstacks
+                           wallpaper (--restore puts the removed apps back)
 (Use the `yellowstacks` launcher; it hands requests to a running Yellowstacks.)
 """
 import argparse
@@ -4106,6 +4109,139 @@ def read_request():
     return word or "show", arg.strip() or None
 
 
+# ---------------------------------------------------------------- a clean Android
+
+# Apps a virtual phone used for games has no use for. They are removed for the
+# only user (`pm uninstall --user 0`), which never touches /system, so
+# `customize --restore` can put every one of them back.
+ANDROID_BLOAT = (
+    "com.google.android.apps.maps", "com.google.android.apps.docs",
+    "com.google.android.apps.photos", "com.google.android.apps.messaging",
+    "com.google.android.gm", "com.google.android.calendar", "com.google.android.contacts",
+    "com.google.android.deskclock", "com.google.android.dialer", "com.google.android.youtube",
+    "com.google.android.apps.youtube.music", "com.google.android.marvin.talkback",
+    "com.google.android.marvin.talkbackoverlay", "com.google.android.apps.wellbeing",
+    "com.google.android.projection.gearhead", "com.google.android.apps.restore",
+    "com.google.android.tts", "com.google.android.apps.wallpaper",
+    "com.google.android.apps.wallpaper.nexus", "com.google.android.apps.customization.pixel",
+    "com.google.android.feedback", "com.google.android.onetimeinitializer",
+    "com.google.android.partnersetup", "com.google.android.printservice.recommendation",
+    "com.google.android.tag", "com.google.android.markup", "com.google.android.setupwizard",
+    "com.google.android.googlequicksearchbox", "com.google.android.cellbroadcastreceiver",
+    "com.android.chrome", "com.android.egg", "com.android.traceur", "com.android.camera2",
+    "com.android.cameraextensions", "com.android.stk", "com.android.bips",
+    "com.android.printspooler", "com.android.musicfx", "com.android.emergency",
+    "com.android.cellbroadcastreceiver", "com.android.bookmarkprovider",
+    "com.android.providers.partnerbookmarks", "com.android.wallpaper.livepicker",
+    "com.android.wallpapercropper", "com.breel.wallpapers18", "com.android.dreams.basic",
+    "com.android.simappdialog", "com.android.managedprovisioning",
+    "com.android.bluetoothmidiservice", "com.android.calllogbackup",
+    "com.android.companiondevicemanager", "com.android.storagemanager",
+    "com.android.wallpaperbackup",
+)
+# Android settings that make it feel like part of Yellowstacks instead of a phone:
+# (table, key, value)
+ANDROID_LOOK = (
+    ("global", "window_animation_scale", "0.5"),      # snappier, still readable
+    ("global", "transition_animation_scale", "0.5"),
+    ("global", "animator_duration_scale", "0.5"),
+    ("global", "heads_up_notifications_enabled", "0"),  # no pop-ups over a game
+    ("system", "sound_effects_enabled", "0"),
+    ("system", "haptic_feedback_enabled", "0"),
+    ("system", "screen_brightness_mode", "0"),
+    ("system", "screen_brightness", "255"),
+    ("secure", "lockscreen.disabled", "1"),
+)
+
+
+def debloat_android(restore=False, log=print):
+    """Remove (or put back) the apps the virtual phone doesn't need. Returns how many."""
+    done = 0
+    for pkg in dict.fromkeys(ANDROID_BLOAT):      # dict.fromkeys drops duplicates
+        if restore:
+            ok = "Success" in adb_shell(f"pm install-existing {pkg}", timeout=30)
+        else:
+            ok = "Success" in adb_shell(f"pm uninstall --user 0 {pkg}", timeout=30)
+        done += bool(ok)
+    log(f"{'restored' if restore else 'removed'} {done} apps")
+    return done
+
+
+def android_look(log=print):
+    """Dark mode and the quality-of-life settings."""
+    adb_shell("cmd uimode night yes")
+    for table, key, value in ANDROID_LOOK:
+        adb_shell(f"settings put {table} {key} {value}")
+    log("dark mode and display settings applied")
+
+
+def wallpaper_image(w, h):
+    """The Yellowstacks wallpaper: the dark theme, a soft glow and the logo."""
+    from PIL import Image, ImageDraw, ImageFilter
+    bg = tuple(int(BG[i:i + 2], 16) for i in (1, 3, 5))
+    yellow = tuple(int(YELLOW[i:i + 2], 16) for i in (1, 3, 5))
+    img = Image.new("RGB", (w, h), bg)
+    # a wide, soft glow behind the middle (drawn small, then scaled up: cheap and smooth)
+    glow = Image.new("L", (w // 4, h // 4), 0)
+    d = ImageDraw.Draw(glow)
+    cx, cy = w // 8, int(h // 4 * 0.62)
+    for i in range(70, 0, -1):
+        r = i / 70
+        d.ellipse([cx - w * 0.156 * r, cy - h * 0.176 * r, cx + w * 0.156 * r, cy + h * 0.176 * r],
+                  fill=int(26 * (1 - r) ** 1.7))
+    glow = glow.resize((w, h), Image.LANCZOS).filter(ImageFilter.GaussianBlur(h // 15))
+    img = Image.composite(Image.new("RGB", (w, h), yellow), img, glow)
+    # the logo, dimmed a little so app icons stay easy to read over it
+    try:
+        size = int(min(w, h) * 0.28)
+        logo = Image.open(ICON).convert("RGBA").resize((size, size), Image.LANCZOS)
+        logo.putalpha(logo.getchannel("A").point(lambda v: int(v * 0.82)))
+        img.paste(logo, (w // 2 - size // 2, int(h * 0.46) - size // 2), logo)
+    except OSError:
+        pass
+    return img
+
+
+def set_wallpaper(log=print):
+    """Write the wallpaper into Android. It shows after the next restart, because
+    Android only reads these files when it starts."""
+    size = adb_shell("wm size")
+    try:
+        w, h = (int(n) for n in size.split(":")[-1].strip().split("x"))
+    except ValueError:
+        w, h = 1920, 1080
+    with tempfile.NamedTemporaryFile(suffix=".png") as f:
+        wallpaper_image(w, h).save(f.name)
+        subprocess.run([ADB, "push", f.name, "/data/local/tmp/ys_wall.png"],
+                       capture_output=True, timeout=60)
+    adb_shell("cp /data/local/tmp/ys_wall.png /data/system/users/0/wallpaper; "
+              "cp /data/local/tmp/ys_wall.png /data/system/users/0/wallpaper_orig; "
+              "chown system:system /data/system/users/0/wallpaper /data/system/users/0/wallpaper_orig; "
+              "chmod 600 /data/system/users/0/wallpaper /data/system/users/0/wallpaper_orig; "
+              "restorecon /data/system/users/0/wallpaper /data/system/users/0/wallpaper_orig; "
+              "rm -f /data/local/tmp/ys_wall.png", timeout=30)
+    log(f"wallpaper set ({w}x{h}); it shows after the next restart")
+
+
+def customize_android(restore=False, log=print):
+    """Strip the virtual phone back to what games need and make it look like
+    Yellowstacks. Everything here can be undone with restore=True."""
+    if not (running_emulator() and pin_adb_to_emulator()):
+        raise BootError("Android isn't running.")
+    subprocess.run([ADB, "root"], capture_output=True, timeout=30)
+    subprocess.run([ADB, "wait-for-device"], capture_output=True, timeout=60)
+    debloat_android(restore, log)
+    if restore:
+        log("the look was left as it is; change it in Settings -> Android")
+        return
+    android_look(log)
+    set_wallpaper(log)
+
+
+def cmd_customize(args):
+    customize_android(restore=args.restore)
+
+
 def cmd_run(args):
     import tkinter as tk
     from Xlib import display
@@ -4284,13 +4420,17 @@ def cmd_setup(args):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["run", "setup", "prepare", "install", "settings", "open"])
+    ap.add_argument("command",
+                    choices=["run", "setup", "prepare", "install", "settings", "open", "customize"])
     ap.add_argument("files", nargs="*", help="install: app files; open: a package name")
     ap.add_argument("--profile", default="mlbb")
     ap.add_argument("--open", help="run: open this app (package name) once Android has started")
     ap.add_argument("--page", help="settings: the page to show first")
+    ap.add_argument("--restore", action="store_true",
+                    help="customize: put the removed Android apps back")
     args = ap.parse_args()
     {"run": cmd_run, "setup": cmd_setup, "install": cmd_install, "settings": cmd_settings, "open": cmd_open,
+     "customize": cmd_customize,
      "prepare": lambda a: (pin_adb_to_emulator(), prepare_android())}[args.command](args)
 
 
