@@ -3,10 +3,8 @@
 
 Starting: a loading screen shows where the game window will be while Android
 starts (the emulator's own window stays minimised until Android is ready), then
-the Yellowstacks home screen — every app you have installed as a tile, in the
-game window's place — or an app chosen in Settings → Startup (`mlbb` opens
-Mobile Legends). Android's own launcher is never shown: the home screen takes
-its place whenever an app closes.
+Android's home screen, or an app chosen in Settings → Startup (`mlbb` opens
+Mobile Legends).
 
 Replaces the emulator's side bar with its own, docked to the game window:
   minimise / close (shuts Android down cleanly), power, volume, rotate, back,
@@ -185,8 +183,7 @@ DEFAULT_SETTINGS = {
     "vsync": False,             # sync the emulator's window to the PC monitor
     "resolution": [1920, 1080],
     "dpi": 0,                   # 0 = automatic for the resolution
-    "start_app": "",            # package to open once Android has started; "" = the
-                                # Yellowstacks home screen, ANDROID_HOME = Android's own
+    "start_app": "",            # package to open once Android has started; "" = home screen
     "controls_on_start": True,
     "remember_window": True,
     "show_emulator_bar": False,
@@ -388,21 +385,16 @@ def installed_packages():
             if line.startswith("package:")]
 
 
-LAUNCHER_PKG = "com.google.android.apps.nexuslauncher"   # Android's own home screen
-LAUNCHER_ICONS = f"/data/data/{LAUNCHER_PKG}/databases/app_icons.db"
-ANDROID_HOME = "@android"   # start_app: show Android's launcher instead of ours
+LAUNCHER_ICONS = "/data/data/com.google.android.apps.nexuslauncher/databases/app_icons.db"
 
 
-HIDE_FROM_HOME = {LAUNCHER_PKG, "com.android.settings.intelligence", "com.android.traceur"}
-
-
-def list_apps(system=False):
-    """Installed apps as [{"package", "label", "icon" (PNG bytes or None), "launchable",
-    "system"}], by name. Names and icons come from the home screen's own icon cache
-    (needs root, which this userdebug image has); apps it hasn't seen yet are shown by
-    package name. With system=True, Android's own apps that can be opened (Settings,
-    Files) are listed after the installed ones, as the home screen shows them."""
+def list_apps():
+    """Installed apps as [{"package", "label", "icon" (PNG bytes or None)}], by name.
+    Names and icons come from the home screen's own icon cache (needs root, which
+    this userdebug image has); apps it hasn't seen yet are shown by package name."""
     packages = installed_packages()
+    if not packages:
+        return []
     launchable = {}
     out = adb_shell("cmd package query-activities --brief -a android.intent.action.MAIN "
                     "-c android.intent.category.LAUNCHER")
@@ -410,11 +402,6 @@ def list_apps(system=False):
         line = line.strip()
         if "/" in line and not line.startswith(("priority", "Activity")):
             launchable.setdefault(line.split("/", 1)[0], line)
-    installed = set(packages)
-    if system:
-        packages += sorted(p for p in launchable if p not in installed and p not in HIDE_FROM_HOME)
-    if not packages:
-        return []
     names, icons = {}, {}
     quoted = ",".join(f"'{p}'" for p in packages)
     sql = (f"select substr(componentName, 1, instr(componentName, '/') - 1), label, hex(icon) "
@@ -430,9 +417,8 @@ def list_apps(system=False):
             except ValueError:
                 icons[parts[0]] = None
     apps = [{"package": p, "label": names.get(p) or p, "icon": icons.get(p),
-             "launchable": p in launchable, "system": p not in installed} for p in packages]
-    # the installed apps first, each group by name: Android's own come last
-    return sorted(apps, key=lambda a: (a["system"], a["label"].lower()))
+             "launchable": p in launchable} for p in packages]
+    return sorted(apps, key=lambda a: a["label"].lower())
 
 
 # ---------------------------------------------------------------- emulator
@@ -1601,10 +1587,6 @@ class App:
         self.branded = None
         self.watched = None
         self.editor = None
-        self.home = None            # our home screen, in place of Android's launcher
-        self.home_wanted = False
-        self.android_home = False   # the user asked for Android's own launcher
-        self.busy_until = 0.0       # an app was just opened: give it time to come up
         self.icon_argb = load_icon_argb()
         self.bar = SideBar(root, self)
         ctl.on_change = self.bar.refresh_toggle
@@ -1653,11 +1635,6 @@ class App:
             elif not self.hide_original and not visible:
                 orig.map()
                 self.xwin.d.flush()
-        self.check_launcher()
-        if self.home is not None and self.home.visible:
-            self.hide_emulator()
-            self.dock_to_home()
-            return
         geo = self.xwin.geometry(main)
         if geo is None or self.shutting_down or "_NET_WM_STATE_FULLSCREEN" in self.xwin.net_state(main):
             self.bar.hide()
@@ -1727,10 +1704,8 @@ class App:
     def action(self, name, widget):
         if self.shutting_down:
             return
-        simple = {"back": Emulator.BACK, "recents": Emulator.RECENTS}
-        if name == "home":
-            self.show_home()
-        elif name in simple:
+        simple = {"back": Emulator.BACK, "home": Emulator.HOME, "recents": Emulator.RECENTS}
+        if name in simple:
             self.emu.press(simple[name])
         elif name in ("rot_left", "rot_right"):
             self.rotate(+90 if name == "rot_left" else -90)
@@ -1833,7 +1808,6 @@ class App:
         m.add_separator()
         m.add_command(label="Install an app (APK)…", command=self.install_apps)
         m.add_command(label="Your apps…", command=lambda: self.open_settings("apps"))
-        m.add_command(label="Android's own home screen", command=self.show_android_home)
         m.add_command(label="Open screenshots folder",
                       command=lambda: subprocess.Popen(["xdg-open", str(pictures_dir() / APP)]))
         m.add_separator()
@@ -1876,118 +1850,22 @@ class App:
         self.settings = dict(s)
         self.hide_original = not s["show_emulator_bar"]
 
-    def apps_changed(self, packages):
-        """After an install or a remove: read the app list again where it is shown."""
-        if not packages:
-            return
-        if self.home is not None and self.home.alive:
-            self.home.reload()
-        if self.settings_win is not None and self.settings_win.alive:
-            self.settings_win.reload_apps()
-
     def install_apps(self, paths=None):
         def chosen(paths):
             if isinstance(paths, list) and paths:
-                self.install_dialog = InstallDialog(self.root, paths, on_close=self.apps_changed)
+                self.install_dialog = InstallDialog(
+                    self.root, paths, on_close=lambda pkgs: self.settings_win and self.settings_win.alive
+                    and pkgs and self.settings_win.reload_apps())
         if paths:
             chosen(list(paths))
         else:
             run_in_thread(self.root, choose_app_files, chosen)
 
-    # -- the home screen and the game window
-
-    def front_window(self):
-        """Whichever of the two the user should be looking at now."""
-        if self.home is not None and self.home.visible:
-            return self.home.wrapper
-        return self.xwin.emulator()[0]
-
     def show_game(self):
         """Bring the game window to the front (and out of minimised)."""
-        self.home_wanted = False
-        geo = self.home.client_geometry() if (self.home is not None and self.home.visible) else None
         main, _ = self.xwin.emulator()
         if main is not None:
-            try:
-                self.xwin.skip_taskbar(main, False)
-                if geo:
-                    self.xwin.move_resize(main, *geo)   # exactly where the home screen was
-                self.xwin.activate(main)
-                self.xwin.d.flush()
-            except Exception as e:
-                print("couldn't show the game window:", e, flush=True)
-        if self.home is not None:
-            self.home.hide()
-        self.root.after(0, self.follow_now)   # move the side bar across straight away
-
-    def show_current(self):
-        """Raise whichever of the two is in use (the launcher's `show` request)."""
-        self.show_home() if self.home_wanted else self.show_game()
-
-    def show_home(self):
-        """Put Yellowstacks' home screen in the game window's place."""
-        self.home_wanted = True
-        self.android_home = False
-        main, _ = self.xwin.emulator()
-        geo = self.xwin.geometry(main) if main is not None else None
-        if self.home is None or not self.home.alive:
-            self.home = HomeScreen(self.root, self.xwin, on_open=self.launch,
-                                   on_install=self.install_apps, on_close=self.confirm_close,
-                                   geometry=geo)
-            self.home.reload()
-        else:
-            self.home.show(geo)
-        self.hide_emulator()
-
-    def show_android_home(self):
-        """Android's own launcher, just this once (the ... menu)."""
-        self.android_home = True
-        self.emu.press(Emulator.HOME)
-        self.show_game()
-
-    def launch(self, package):
-        """Open an app from the home screen, then switch to the game window."""
-        self.busy_until = time.time() + 15   # don't drop back to home while it starts
-        threading.Thread(target=open_app, args=(package,), daemon=True).start()
-        self.show_game()
-
-    def hide_emulator(self):
-        """Keep the game window out of sight while the home screen is up: minimised and
-        out of the taskbar, but still mapped and drawing (taking it off the screen
-        completely makes the emulator's graphics crash)."""
-        main, _ = self.xwin.emulator()
-        if main is None or "_NET_WM_STATE_HIDDEN" in self.xwin.net_state(main):
-            return
-        try:
-            self.xwin.skip_taskbar(main, True)
-            self.xwin.minimise(main)
-            self.xwin.d.flush()
-        except Exception:
-            pass
-
-    def check_launcher(self):
-        """Android's own launcher is never shown: when an app closes and Android drops
-        back to it, the Yellowstacks home screen takes its place."""
-        if self.shutting_down or self.home_wanted or time.time() < self.busy_until:
-            return
-        front = self.ctl.foreground.package
-        if front is not None and front != LAUNCHER_PKG:
-            self.android_home = False   # they have left it: back to normal
-        elif front == LAUNCHER_PKG and not self.android_home:
-            self.show_home()
-
-    def dock_to_home(self):
-        """The side bar follows the home screen window as it does the game window."""
-        geo = self.home.client_geometry()
-        if (geo is None or self.shutting_down
-                or "_NET_WM_STATE_FULLSCREEN" in self.xwin.net_state(self.home.wrapper)):
-            self.bar.hide()
-            return
-        if not self.bar.shown and self.active_window() not in (self.home.wrapper.id, self.bar.wrapper.id):
-            return
-        x, y, w, h = geo
-        self.remember_window(geo)
-        self.bar.show_at(x + w, y, self.home.wrapper)
+            self.xwin.activate(main)
 
     def restart_emulator(self):
         """Start the emulator again (new hardware settings): shut Android down, then
@@ -2869,16 +2747,6 @@ def generic_app_icon(size, bg=RAISED):
     return p.photo()
 
 
-def install_tile_icon(size):
-    """The home screen's "Install an app" tile: a plus on an outlined square."""
-    p = Painter(size, size)
-    p.rrect(1, 1, size - 1, size - 1, size * 0.24, fill=RAISED, outline=LINE, width=1.6)
-    c, k = size / 2, size / 40
-    p.line([c, c - 9 * k, c, c + 9 * k], YELLOW, 2.8 * k)
-    p.line([c - 9 * k, c, c + 9 * k, c], YELLOW, 2.8 * k)
-    return p.photo()
-
-
 def app_icon_photo(png, size):
     """A Tk image from the PNG bytes of an Android app icon (None if unreadable)."""
     try:
@@ -3601,10 +3469,10 @@ class SettingsWindow:
 
     def page_startup(self):
         self.header("Startup", f"What happens when you start {APP}.")
-        box = self.block("When Android has started, show",
-                         f"The {APP} home screen lists everything you have installed. "
-                         f"(The mlbb command always opens {GAME_NAME}.)")
-        options = [("", f"The {APP} home screen"), (ANDROID_HOME, "Android's own home screen")]
+        box = self.block("When Android has started, open",
+                         "Nothing shows Android's home screen. (The mlbb command always opens "
+                         f"{GAME_NAME}.)")
+        options = [("", "Nothing — the home screen")]
         for a in self.apps or []:
             if a.get("launchable"):
                 options.append((a["package"], a["label"]))
@@ -3702,10 +3570,9 @@ class SettingsWindow:
         run_in_thread(self.top, choose_app_files, chosen)
 
     def open(self, a):
+        threading.Thread(target=open_app, args=(a["package"],), daemon=True).start()
         if self.app is not None:
-            self.app.launch(a["package"])
-        else:
-            threading.Thread(target=open_app, args=(a["package"],), daemon=True).start()
+            self.app.show_game()
 
     def uninstall(self, a):
         if not ask(self.top, f"Remove {a['label']}?", "The app and everything it saved on this phone are "
@@ -3716,8 +3583,6 @@ class SettingsWindow:
             notify(f"Removed {a['label']}")
             if self.alive:
                 self.reload_apps()
-            if self.app is not None and self.app.home is not None and self.app.home.alive:
-                self.app.home.reload()
         run_in_thread(self.top, lambda: subprocess.run([ADB, "uninstall", a["package"]], capture_output=True,
                                                        timeout=120), done)
 
@@ -3924,257 +3789,6 @@ def glow_background(w, h, cy):
     return ImageChops.add(img, noise, 1.0, -128)
 
 
-# ---------------------------------------------------------------- home screen
-
-
-def game_geometry(xwin, root, remember=True):
-    """Where the game window was last time (its inside), else 1280x720, centred."""
-    if remember:
-        try:
-            x, y, w, h = json.loads(App.WINDOW_FILE.read_text())["geometry"]
-            if w > h >= 270:
-                return x, y, w, h
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
-    px, py = root.winfo_pointerxy()
-    ax, ay, aw, ah = xwin.workarea_for(px, py)
-    w = min(1280, aw - 80)
-    h = w * 9 // 16
-    if h > ah - 100:
-        h = ah - 100
-        w = h * 16 // 9
-    return ax + (aw - w) // 2, ay + (ah - h) // 2 + 14, w, h
-
-
-class HomeScreen:
-    """Yellowstacks' home screen: every installed app as a tile, in the game window's
-    place, with the side bar docked to it as usual.
-
-    It stands in for Android's own launcher, which the user never sees. While it is
-    up the emulator's window is minimised and out of the taskbar — the same trick
-    the loading screen uses, because taking that window off the screen completely
-    makes the emulator's graphics crash.
-
-    Everything is drawn on one canvas so the tiles sit straight on the background
-    glow; Tk widgets would bring their own opaque rectangles with them.
-    """
-
-    PAD = 30       # margin around the grid
-    CELL = 156     # tile pitch across
-    ROW = 140      # tile pitch down
-    ICON = 72
-    HEADER = 54    # the strip with the logo and the clock
-
-    def __init__(self, root, xwin, on_open, on_install, on_close, geometry=None):
-        import tkinter as tk
-        self.tk, self.root, self.xwin = tk, root, xwin
-        self.on_open, self.on_install, self.on_close = on_open, on_install, on_close
-        self.apps = None       # None while they are still being read
-        self.cells = []        # (cx, cy, kind, package) in canvas coordinates
-        self.icons = {}        # package -> PhotoImage
-        self.hover = None
-        self.hover_item = None
-        self.clock_item = None
-        self.size = None
-        self.fixed_at = 0.0
-        self.layout_job = None
-        self.alive = True
-
-        geo = geometry or game_geometry(xwin, root)
-        x, y, w, h = geo
-        self.top = top = tk.Toplevel(root, bg=BG, class_="Yellowstacks")
-        top.title(APP)
-        window_icon(top)
-        top.geometry(f"{w}x{h}+{x}+{max(0, y - 30)}")
-        top.minsize(480, 270)
-        self.c = tk.Canvas(top, bg=BG, highlightthickness=0, bd=0, width=w, height=h)
-        self.c.pack(fill="both", expand=True)
-        self.c.bind("<Configure>", self.on_resize)
-        self.c.bind("<Motion>", lambda e: self.set_hover(self.hit(e)))
-        self.c.bind("<Leave>", lambda e: self.set_hover(None))
-        self.c.bind("<Button-1>", self.on_click)
-        self.c.bind("<Button-4>", lambda e: self.scroll(-2))
-        self.c.bind("<Button-5>", lambda e: self.scroll(2))
-        top.protocol("WM_DELETE_WINDOW", self.on_close)
-        top.update_idletasks()
-        self.wrapper = xwin.d.create_resource_object("window", top.winfo_id()).query_tree().parent
-        self.layout(w, h)
-        top.after(120, lambda: self.xwin.move_resize(self.wrapper, *geo))  # client area exactly there
-        self.tick()
-
-    # -- the window
-
-    def client_geometry(self):
-        return self.xwin.geometry(self.wrapper)
-
-    @property
-    def visible(self):
-        return self.alive and bool(self.top.winfo_viewable())
-
-    def show(self, geo=None):
-        self.top.deiconify()
-        self.top.lift()
-        if geo:
-            self.xwin.move_resize(self.wrapper, *geo)
-        self.xwin.activate(self.wrapper)
-
-    def hide(self):
-        if self.alive:
-            self.top.withdraw()
-
-    # -- the apps
-
-    def set_apps(self, apps):
-        """Take the list from list_apps(), or None while it is still being read."""
-        if not self.alive:
-            return
-        self.apps = apps if isinstance(apps, list) else ([] if apps is not None else None)
-        self.icons.clear()
-        if self.size:
-            self.layout(*self.size)
-
-    def reload(self):
-        """Read the installed apps again (after an install or a remove)."""
-        if not self.alive:
-            return
-        self.set_apps(None)
-        run_in_thread(self.top, lambda: list_apps(system=True), self.set_apps)
-
-    # -- drawing
-
-    def on_resize(self, e):
-        if (e.width, e.height) != self.size:
-            if self.layout_job:
-                self.top.after_cancel(self.layout_job)
-            self.layout_job = self.top.after(60, lambda: self.layout(e.width, e.height))
-
-    def layout(self, w, h):
-        from PIL import ImageTk
-        self.layout_job = None
-        self.size = (w, h)
-        c = self.c
-        c.delete("all")
-        self.hover = None
-        self.fixed_at = 0.0
-        c.yview_moveto(0)
-        # background and hover tile first: canvas items stack in the order they are made,
-        # so everything drawn after this lands on top of them
-        self.bg_img = ImageTk.PhotoImage(glow_background(w, h, 0.34))
-        c.create_image(0, 0, anchor="nw", image=self.bg_img, tags=("fixed",))
-        self.hover_img = self.tile_image()
-        self.hover_item = c.create_image(0, 0, image=self.hover_img, state="hidden")
-        bottom = self.grid(w, h)
-        self.header(w)
-        c.configure(scrollregion=(0, 0, w, max(h, bottom + self.PAD)))
-
-    def tile_image(self):
-        """The rounded panel that lights up behind the tile under the mouse."""
-        w, h = self.CELL - 12, self.ROW - 12
-        p = Painter(w, h)
-        p.rrect(0.5, 0.5, w - 0.5, h - 0.5, 14, fill="#26242e", outline=LINE, width=1.4)
-        return p.photo()
-
-    def header(self, w):
-        c = self.c
-        self.logo_img = logo_photo(24)
-        c.create_image(self.PAD, self.HEADER / 2, image=self.logo_img, tags=("fixed",))
-        c.create_text(self.PAD + 20, self.HEADER / 2, text=APP, anchor="w", fill=TEXT,
-                      font=("Sans", 12, "bold"), tags=("fixed",))
-        self.clock_item = c.create_text(w - self.PAD, self.HEADER / 2, text=time.strftime("%H:%M"),
-                                        anchor="e", fill=MUTED, font=("Sans", 11), tags=("fixed",))
-
-    def grid(self, w, h):
-        """Lay the tiles out in rows that fill the width. Returns the bottom edge."""
-        c = self.c
-        self.cells = []
-        if self.apps is None:
-            c.create_text(w / 2, h * 0.45, text="Reading your apps…", fill=MUTED, font=("Sans", 12))
-            return h
-        items = [("app", a) for a in self.apps if a.get("launchable")]
-        items.append(("install", None))
-        cols = max(1, int((w - 2 * self.PAD) // self.CELL))
-        pitch = (w - 2 * self.PAD) / cols
-        top = self.HEADER + 16
-        for i, (kind, a) in enumerate(items):
-            cx = self.PAD + pitch * (i % cols + 0.5)
-            cy = top + self.ROW * (i // cols) + self.ROW / 2
-            self.cell(kind, a, cx, cy)
-        bottom = top + self.ROW * ((len(items) + cols - 1) // cols)
-        if len(items) == 1:  # only the install tile
-            c.create_text(w / 2, bottom + 20, text="No apps yet. Install an APK to get started.",
-                          fill=MUTED, font=("Sans", 11))
-            bottom += 44
-        return bottom
-
-    def cell(self, kind, a, cx, cy):
-        c = self.c
-        install = kind == "install"
-        key = "@install" if install else a["package"]
-        label = "Install an app" if install else a["label"]
-        if key not in self.icons:
-            png = None if install else a.get("icon")
-            self.icons[key] = (install_tile_icon(self.ICON) if install else
-                               (app_icon_photo(png, self.ICON) if png else None)
-                               or generic_app_icon(self.ICON))
-        iy = cy - 16
-        c.create_image(cx, iy, image=self.icons[key])
-        if len(label) > 34:
-            label = label[:33].rstrip() + "…"
-        c.create_text(cx, iy + self.ICON / 2 + 13, text=label, fill=TEXT, font=("Sans", 10),
-                      width=self.CELL - 16, justify="center", anchor="n")
-        self.cells.append((cx, cy, kind, None if install else a["package"]))
-
-    # -- the mouse
-
-    def hit(self, e):
-        x, y = self.c.canvasx(e.x), self.c.canvasy(e.y)
-        for i, (cx, cy, _, _) in enumerate(self.cells):
-            if abs(x - cx) <= (self.CELL - 12) / 2 and abs(y - cy) <= (self.ROW - 12) / 2:
-                return i
-        return None
-
-    def set_hover(self, i):
-        if i == self.hover or self.hover_item is None:
-            return
-        self.hover = i
-        if i is None:
-            self.c.itemconfigure(self.hover_item, state="hidden")
-            self.c.configure(cursor="")
-        else:
-            self.c.coords(self.hover_item, self.cells[i][0], self.cells[i][1])
-            self.c.itemconfigure(self.hover_item, state="normal")
-            self.c.configure(cursor="hand2")
-
-    def on_click(self, e):
-        i = self.hit(e)
-        if i is None:
-            return
-        _, _, kind, package = self.cells[i]
-        if kind == "install":
-            self.on_install()
-        else:
-            self.on_open(package)
-
-    def scroll(self, units):
-        self.c.yview_scroll(units, "units")
-        self.pin()
-
-    def pin(self):
-        """Keep the background and the header still while the tiles scroll under them."""
-        top = self.c.canvasy(0)
-        dy = top - self.fixed_at
-        if dy:
-            self.c.move("fixed", 0, dy)
-            self.fixed_at = top
-
-    def tick(self):
-        if not self.alive:
-            return
-        if self.clock_item is not None:
-            self.c.itemconfigure(self.clock_item, text=time.strftime("%H:%M"))
-        self.top.after(10000, self.tick)
-
-
 class BootScreen:
     """The loading screen. It takes the game window's place while Android starts;
     the emulator's own window stays hidden until Android is ready, then appears
@@ -4190,14 +3804,12 @@ class BootScreen:
         "The keyboard button on the side bar moves the game controls.",
         "Screenshots go to Pictures/Yellowstacks.",
     ]
-    SPIN = 40    # frames per turn of the ring
-    FIND_MS = 8   # how often to look for the emulator's window before it first appears
+    SPIN = 40  # frames per turn of the ring
 
-    def __init__(self, root, booter, xwin, on_ready, on_cancel, on_retry, show_home=False):
+    def __init__(self, root, booter, xwin, on_ready, on_cancel, on_retry):
         import tkinter as tk
         self.tk, self.root, self.booter, self.xwin = tk, root, booter, xwin
         self.on_ready, self.on_cancel, self.on_retry = on_ready, on_cancel, on_retry
-        self.show_home = show_home  # the home screen takes over: never show the emulator
         self.shown = 0.0
         self.frame = 0
         self.tip = random.randrange(len(self.TIPS))
@@ -4230,13 +3842,26 @@ class BootScreen:
         self.layout(w, h)
         top.after(120, lambda: self.xwin.move_resize(self.wrapper, *self.geo))  # client area exactly there
         self.animate()
-        self.watch_for_emulator()
 
     # -- where it goes
 
     def start_geometry(self):
-        return game_geometry(self.xwin, self.root,
-                             self.booter.settings.get("remember_window", True))
+        """Where the game window was last time (its inside), else 1280x720, centred."""
+        if self.booter.settings.get("remember_window", True):
+            try:
+                x, y, w, h = json.loads(App.WINDOW_FILE.read_text())["geometry"]
+                if w > h >= 270:
+                    return x, y, w, h
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        px, py = self.root.winfo_pointerxy()
+        ax, ay, aw, ah = self.xwin.workarea_for(px, py)
+        w = min(1280, aw - 80)
+        h = w * 9 // 16
+        if h > ah - 100:
+            h = ah - 100
+            w = h * 16 // 9
+        return ax + (aw - w) // 2, ay + (ah - h) // 2 + 14, w, h
 
     def client_geometry(self):
         return self.xwin.geometry(self.wrapper)
@@ -4360,16 +3985,6 @@ class BootScreen:
                                                 self.xwin.X.AnyPropertyType)
         return prop.value[0] if prop and len(prop.value) else 0
 
-    def watch_for_emulator(self):
-        """Look for the emulator's window often until it first turns up, then leave it to
-        animate(). The window manager only lists a window once it has mapped it, so the
-        window is always on screen for a moment before we can minimise it; at the
-        animation's pace that moment was a tenth of a second, and it showed as a flash."""
-        if not self.alive or self.hidden_main is not None:
-            return
-        self.hide_emulator()
-        self.top.after(self.FIND_MS, self.watch_for_emulator)
-
     def hide_emulator(self):
         """Keep the emulator's window out of sight while Android starts: minimised and
         out of the taskbar. (It stays mapped and keeps drawing, as when you minimise it
@@ -4377,7 +3992,7 @@ class BootScreen:
         crash.) Google's side bar is hidden for good, as always."""
         main, bar = self.xwin.emulator()
         try:
-            if main is not None and (self.show_home or not self.revealing):
+            if main is not None and not self.revealing:
                 self.main_seen = main
                 if self.hidden_main != main.id or self.xwin.geometry(main) is not None:
                     stole = self.active_window() == main.id
@@ -4409,30 +4024,27 @@ class BootScreen:
                 pass
         if main is not None:
             try:
+                self.xwin.skip_taskbar(main, False)
                 if geo:
                     main.configure(x=geo[0], y=geo[1], width=geo[2], height=geo[3])
                     self.xwin.move_resize(main, *geo)
-                if not self.show_home:
-                    self.xwin.skip_taskbar(main, False)
-                    self.xwin.activate(main)  # out of minimised, in front
+                self.xwin.activate(main)  # out of minimised, in front
                 self.xwin.d.flush()
             except Exception as e:
                 print("couldn't show the emulator window:", e, flush=True)
-            if geo and not self.show_home:
+            if geo:
                 self.top.after(250, lambda: self.xwin.move_resize(main, *geo))
-        self.top.after(200 if self.show_home else 900, self.finish)
+        self.top.after(900, self.finish)
 
     def finish(self):
         self.alive = False
-        front = None
         main = self.xwin.emulator()[0] or self.main_seen
         try:
-            front = self.on_ready()   # side bar + controls take over from here
+            self.on_ready()   # side bar + controls take over from here
         finally:
             self.top.destroy()
-            win = front if front is not None else main
-            if win is not None:
-                self.xwin.activate(win)
+            if main is not None:
+                self.xwin.activate(main)
 
     def fail(self):
         self.failed = True
@@ -4638,8 +4250,7 @@ def cmd_run(args):
     root = tk.Tk(className="yellowstacks")
     root.withdraw()  # the root window becomes the side bar later
     theme_tk(root)
-    state = {"app": None, "ctl": None, "boot": None, "booter": None, "settings": None,
-             "show_home": False}
+    state = {"app": None, "ctl": None, "boot": None, "booter": None, "settings": None}
 
     def start_app():
         prof = load_profile(args.profile)
@@ -4655,12 +4266,9 @@ def cmd_run(args):
         app = App(root, ctl, emu, args.profile)
         ctl.refresh_focus()
         state.update(app=app, ctl=ctl, boot=None)
-        if state["show_home"]:
-            app.show_home()
         print(f"{APP} running. ` toggles the controls, F11 full screen.", flush=True)
         root.after(TICK_MS, tick)
         root.after(1000, watch_profile)
-        return app.front_window()   # what the loading screen hands over to
 
     def tick():
         state["ctl"].tick()
@@ -4694,7 +4302,7 @@ def cmd_run(args):
         app, boot = state["app"], state["boot"]
         if word == "open" and arg:
             if app is not None:
-                app.launch(arg)
+                threading.Thread(target=open_app, args=(arg,), daemon=True).start()
             elif state["booter"] is not None and not state["booter"].reached.get("booted"):
                 state["booter"].open_app = arg
         if word == "settings":
@@ -4703,7 +4311,7 @@ def cmd_run(args):
             elif state["settings"] is None or not state["settings"].alive:
                 state["settings"] = SettingsWindow(root, None)
         elif app is not None:
-            app.show_current()
+            app.show_game()
         elif boot is not None and boot.alive:
             boot.lift()
 
@@ -4716,28 +4324,21 @@ def cmd_run(args):
         else:
             root.quit()
 
-    # What to show once Android is up: an app, Android's own launcher, or -- the
-    # default -- our home screen with everything that is installed on it.
-    wanted = args.open or settings["start_app"]
-    open_pkg = wanted if wanted and wanted != ANDROID_HOME else None
-    state["show_home"] = not wanted
-
     found = pin_adb_to_emulator()
     if found and android_booted():
         # Android is already up (Yellowstacks itself was restarted): no loading screen
         def ready():
             prepare_android()
-            if open_pkg:
-                open_app(open_pkg)
+            if args.open:
+                open_app(args.open)
         threading.Thread(target=ready, daemon=True).start()
         start_app()
     else:
-        booter = Booter(settings, open_app=open_pkg)
+        booter = Booter(settings, open_app=args.open or settings["start_app"] or None)
         state["booter"] = booter
         state["boot"] = BootScreen(root, booter, XWindows(display.Display()), on_ready=start_app,
                                    on_cancel=lambda: stop_then(root.quit),
-                                   on_retry=lambda: stop_then(start_over),
-                                   show_home=state["show_home"])
+                                   on_retry=lambda: stop_then(start_over))
 
     # SIGTERM/SIGINT: just quit (the launcher's `stop` does the Android shutdown);
     # SIGUSR1: shut Android down properly, same as the close button;

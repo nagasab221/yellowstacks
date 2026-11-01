@@ -1,9 +1,8 @@
 # Yellowstacks
 
 An Android app player for Linux, built around Google's Android emulator — a
-BlueStacks-style experience on X11, with a loading screen, a home screen of your
-games, its own side bar, a settings window, an APK installer and keyboard
-controls for touch games.
+BlueStacks-style experience on X11, with a loading screen, its own side bar,
+a settings window, an APK installer and keyboard controls for touch games.
 
 Made for playing Mobile Legends: Bang Bang on Linux Mint, but it runs any
 Android app.
@@ -35,9 +34,6 @@ Android SDK.
 
 - **Loading screen** — a proper start-up screen with a progress bar that
   learns how long your PC actually takes, instead of a blank emulator window.
-- **A home screen of your games** — everything you have installed as a tile,
-  in the Yellowstacks theme. It opens at start and whenever an app closes, so
-  you never see Android's own launcher. Click a tile to play.
 - **Its own side bar** — minimise, close, power, volume, rotate, back, home,
   recent apps, screenshot, window sizes and full screen.
 - **Settings** — CPU cores, memory, frame rate (30–120 FPS), VSync,
@@ -53,7 +49,7 @@ Android SDK.
 
 | Command | What it does |
 | --- | --- |
-| `yellowstacks` | Start it (loading screen, then the home screen) |
+| `yellowstacks` | Start it (loading screen, then Android's home screen) |
 | `yellowstacks open <package>` | Start if needed, then open that app |
 | `mlbb` | Shortcut for `yellowstacks open com.mobile.legends` |
 | `yellowstacks install [files]` | Install apps; with no files, pick them |
