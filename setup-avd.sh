@@ -12,7 +12,7 @@ AVD=${AVD:-MLBB2}
 SDK="$HOME/Android/Sdk"
 ADB="$SDK/platform-tools/adb"
 IMAGE="system-images;android-33;google_apis;x86_64"
-LOG="$HOME/.cache/emu-keymap/setup-$AVD.log"
+LOG="$HOME/.cache/yellowstacks/setup-$AVD.log"
 mkdir -p "$(dirname "$LOG")"
 
 wait_boot() {
