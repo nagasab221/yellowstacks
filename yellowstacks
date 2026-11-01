@@ -1,0 +1,56 @@
+#!/bin/bash
+# Yellowstacks: Android games and apps in the Android emulator, with a loading
+# screen, its own side bar, settings and keyboard controls.
+#   yellowstacks                  start (loading screen, then Android's home screen)
+#   yellowstacks open <package>   start if needed, then open that app
+#   mlbb                          the same as: yellowstacks open com.mobile.legends
+#   yellowstacks install [files]  install apps (.apk .xapk .apks .apkm); no files: pick them
+#   yellowstacks <file.apk>       the same as install (what the file manager runs)
+#   yellowstacks settings         the settings
+#   yellowstacks edit             the controls editor
+#   yellowstacks stop             shut Android down properly and close everything
+set -u
+HERE="$(dirname "$(readlink -f "$0")")"
+PY="$HERE/.venv/bin/python"
+ADB="$HOME/Android/Sdk/platform-tools/adb"
+LOGS="$HOME/.cache/yellowstacks"
+mkdir -p "$LOGS"
+
+# the running app, if any (match the interpreter + script, never this launcher's own command line)
+app_pid() { pgrep -f "^\S*python\S* \S*yellowstacks\.py run( |$)" | head -1; }
+emulator_running() { pgrep -f -- "qemu-system-x86_64\S* .*-avd ${YS_AVD:-MLBB2}( |$)" >/dev/null; }
+# ask the running app for something: show | settings | open <package>
+request() {
+  local pid; pid=$(app_pid)
+  [ -n "$pid" ] || return 1
+  printf '%s\n' "$*" > "$LOGS/request"
+  kill -USR2 "$pid"
+}
+start() { setsid "$PY" "$HERE/yellowstacks.py" run "$@" >"$LOGS/app.log" 2>&1 < /dev/null & }
+
+# `mlbb` opens Mobile Legends
+if [ "$(basename "$0")" = mlbb ] && [ $# -eq 0 ]; then set -- open com.mobile.legends; fi
+# files (from the file manager): install them
+if [ $# -gt 0 ] && [ -f "$1" ]; then set -- install "$@"; fi
+
+case "${1:-start}" in
+  start)
+    request show || start ;;
+  open)
+    pkg=${2:?usage: yellowstacks open <package>}
+    request open "$pkg" || start --open "$pkg" ;;
+  install)
+    shift; exec "$PY" "$HERE/yellowstacks.py" install "$@" ;;
+  settings)
+    request settings || exec "$PY" "$HERE/yellowstacks.py" settings ;;
+  edit|setup)
+    exec "$PY" "$HERE/yellowstacks.py" setup ;;
+  stop)
+    pid=$(app_pid)
+    if [ -n "$pid" ]; then
+      kill -USR1 "$pid"      # the app shuts Android down and waits for the emulator to exit
+    elif emulator_running; then
+      "$ADB" shell sync; "$ADB" shell reboot -p >/dev/null 2>&1
+    fi ;;
+  *) echo "usage: yellowstacks [start|open <package>|install [files]|settings|edit|stop]"; exit 1 ;;
+esac
