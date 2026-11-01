@@ -346,11 +346,25 @@ def enter_plain_check():
 def editor_open():
     ed = app.editor
     check("Edit controls opens the editor", ed is not None and ed.alive)
+    check("the toolbar says what the mouse does when nothing is picked",
+          ed.hint.cget("text") == ys.Editor.HINTS[None], ed.hint.cget("text"))
     shot("4-editor")
-    click(*center(find_button(ed.top, "+ Tap")))
+    # pick the joystick that the profile starts with
+    joy = next(u for u, c in ed.items.items() if c["type"] == "joystick")
+    ed.select(joy)
+
+@step
+def editor_hint_joystick():
+    ed = app.editor
+    check("…and changes for a joystick (scroll to resize)",
+          ed.hint.cget("text") == ys.Editor.HINTS["joystick"], ed.hint.cget("text"))
+    click(*center(find_button(ed.top, " Tap")))   # the Add buttons carry a glyph then the name
 
 @step
 def editor_key():
+    ed = app.editor
+    check("…and for a tap (no resizing)",
+          ed.hint.cget("text") == ys.Editor.HINTS["tap"], ed.hint.cget("text"))
     tap_key("g")
 
 @step

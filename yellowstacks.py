@@ -1323,6 +1323,23 @@ def paint_joystick(R, selected):
     return p.photo()
 
 
+def paint_control_glyph(kind, size):
+    """A small mark of a joystick or a tap, for the editor's Add buttons. Drawn the
+    same way as the side bar's icons, because Tk's canvas has no anti-aliasing."""
+    p = Painter(size, size)
+    c = size / 2
+    if kind == "joystick":
+        r = size * 0.36
+        arm = size * 0.19
+        p.ring(c, c, r, YELLOW, max(1.5, size * 0.085))
+        p.line([c, c - arm, c, c + arm], YELLOW, max(1.4, size * 0.08))
+        p.line([c - arm, c, c + arm, c], YELLOW, max(1.4, size * 0.08))
+    else:
+        p.ring(c, c, size * 0.42, YELLOW, max(1.2, size * 0.07))
+        p.dot(c, c, size * 0.2, YELLOW)
+    return p.photo()
+
+
 class SideBar:
     """Yellowstacks' side bar, floating just right of the game window.
 
@@ -2173,6 +2190,7 @@ class Editor:
         self.drag = None
         self.capture = None   # key capture in progress
         self.images = {}      # smooth marker images; Tk needs them kept referenced
+        self.glyphs = {}      # the Add buttons' icons, likewise
         self.alive = True
 
         # same size and place as the emulator screen, so it looks like an overlay
@@ -2202,27 +2220,36 @@ class Editor:
             c.create_text(cw / 2, ch / 2, fill=MUTED, font=("Sans", 14),
                           text="(no screenshot - is the emulator running?)")
 
-        bar = tk.Frame(c, bg=PANEL, padx=8, pady=6, highlightthickness=1, highlightbackground=YELLOW)
+        # the toolbar: what you can add on the left, what you do with it on the right,
+        # and one line underneath that says what the thing you picked can do
+        bar = tk.Frame(c, bg=PANEL, padx=14, pady=9, highlightthickness=1, highlightbackground=LINE)
         row = tk.Frame(bar, bg=PANEL)
-        row.pack()
+        row.pack(fill="x")
         bstyle = dict(bg=RAISED, fg=YELLOW, activebackground=YELLOW, activeforeground=BG,
-                      relief="flat", bd=0, padx=10, pady=4, font=("Sans", 10, "bold"), cursor="hand2")
-        tk.Button(row, text="+ Joystick", command=self.add_joystick, **bstyle).pack(side="left", padx=3)
-        tk.Button(row, text="+ Tap", command=self.add_tap, **bstyle).pack(side="left", padx=3)
-        tk.Frame(row, width=18, bg=PANEL).pack(side="left")
+                      relief="flat", bd=0, highlightthickness=0,  # Tk draws a pale ring otherwise
+                      padx=11, pady=5, font=("Sans", 10, "bold"),
+                      cursor="hand2", compound="left")
+        tk.Label(row, text="Add", bg=PANEL, fg=MUTED,
+                 font=("Sans", 9)).pack(side="left", padx=(0, 9))
+        for kind, label, command in (("joystick", "Joystick", self.add_joystick),
+                                     ("tap", "Tap", self.add_tap)):
+            self.glyphs[kind] = paint_control_glyph(kind, 18)
+            tk.Button(row, text=f" {label}", image=self.glyphs[kind], command=command,
+                      **bstyle).pack(side="left", padx=(0, 7))
+        tk.Frame(row, width=1, bg=LINE).pack(side="left", fill="y", padx=14, pady=2)
         tk.Button(row, text="Save", command=self.save,
-                  **{**bstyle, "bg": YELLOW, "fg": BG, "activebackground": YELLOW_DOWN}).pack(side="left", padx=3)
-        tk.Button(row, text="Cancel", command=self.close, **{**bstyle, "fg": TEXT}).pack(side="left", padx=3)
-        hint = ("Drag to move · Double-click to change keys · Right-click for more\n"
-                "Scroll on a joystick to resize · Delete key removes the selected control")
-        tk.Label(bar, text=hint, bg=PANEL, fg=MUTED, font=("Sans", 8),
-                 justify="center").pack(pady=(4, 0))
-        c.create_window(cw / 2, 8, window=bar, anchor="n")
-        self.banner = None
+                  **{**bstyle, "bg": YELLOW, "fg": BG, "activebackground": YELLOW_DOWN,
+                     "padx": 18}).pack(side="right")
+        tk.Button(row, text="Cancel", command=self.close,
+                  **{**bstyle, "fg": TEXT}).pack(side="right", padx=(0, 7))
+        self.hint = tk.Label(bar, bg=PANEL, fg=MUTED, font=("Sans", 9))
+        self.hint.pack(pady=(9, 0))
+        c.create_window(cw / 2, 10, window=bar, anchor="n")
 
         for ctl in self.prof["controls"]:
             self.track(ctl)
         self.redraw_all()
+        self.show_hint()
 
         c.bind("<ButtonPress-1>", self.on_press)
         c.bind("<B1-Motion>", self.on_motion)
@@ -2277,6 +2304,23 @@ class Editor:
                               font=("Sans", 9, "bold"), tags=(tag,))
         c.tag_raise("banner")
 
+    # what the mouse can do here, for whatever is picked
+    HINTS = {
+        None: "Drag to move  ·  Double-click to change keys  ·  Right-click for more",
+        "tap": "Double-click to change its key  ·  Delete removes it  ·  Right-click for more",
+        "joystick": "Scroll to resize  ·  Double-click to change its keys  ·  Delete removes it",
+    }
+    NOTHING_YET = "Add a joystick or a tap to start mapping the keyboard"
+
+    def show_hint(self):
+        if not self.items:
+            text = self.NOTHING_YET
+        elif self.selected in self.items:
+            text = self.HINTS[self.items[self.selected]["type"]]
+        else:
+            text = self.HINTS[None]
+        self.hint.configure(text=text)
+
     def show_banner(self, text, color=YELLOW):
         c = self.c
         c.delete("banner")
@@ -2322,6 +2366,7 @@ class Editor:
         for u in (old, uid):
             if u is not None and u in self.items:
                 self.draw(u)
+        self.show_hint()
 
     # -- mouse
 
@@ -2417,6 +2462,7 @@ class Editor:
         self.prof["controls"] = [c for c in self.prof["controls"] if c is not ctl]
         if self.selected == uid:
             self.selected = None
+        self.show_hint()
 
     # -- key capture
 
