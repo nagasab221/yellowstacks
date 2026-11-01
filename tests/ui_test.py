@@ -91,8 +91,8 @@ ys.pin_adb_to_emulator = lambda: "emulator-5554"
 ys.android_booted = lambda: True
 ys.onscreen_keyboard = lambda: True
 FAKE_APPS = [{"package": ys.GAME, "label": "Mobile Legends: Bang Bang", "icon": None, "launchable": True}]
-ys.list_apps = lambda: list(FAKE_APPS)
-installed, opened, restarts = [], [], []
+ys.list_apps = lambda system=False: list(FAKE_APPS)
+installed, opened, restarts, hide_calls = [], [], [], []
 def fake_install(paths, status, downgrade=False, replace=False):
     status("Installing: copying 1 MB into Android…")
     time.sleep(0.3)
@@ -116,6 +116,14 @@ root = tk.Tk(className="yellowstacks")
 ctl = ys.Controls(prof, emu, tk_root=root)
 app = ys.App(root, ctl, emu, "mlbb")
 app.restart_emulator = lambda: restarts.append(True)
+# Minimising and the taskbar are the window manager's job, and there is none in
+# Xephyr, so record what the app asks for (as the Minimise test does).
+_real_minimise, _real_skip = app.xwin.minimise, app.xwin.skip_taskbar
+def spy_minimise(w):
+    hide_calls.append(("minimise", w.id)); return _real_minimise(w)
+def spy_skip(w, on):
+    hide_calls.append(("skip", w.id, on)); return _real_skip(w, on)
+app.xwin.minimise, app.xwin.skip_taskbar = spy_minimise, spy_skip
 fullscreen_calls = []
 real_toggle_fullscreen = app.toggle_fullscreen
 
@@ -208,14 +216,13 @@ def hover_tip_check():
     shot("2-tooltip")
     emu.log.clear()
     click(*bar_button("back"))
-    click(*bar_button("home"))
     click(*bar_button("recents"))
 
 @step
 def nav_check():
     codes = [e[1] for e in emu.events("press")]
-    check("Back / Home / Recent apps send the right Android keys",
-          codes == [ys.Emulator.BACK, ys.Emulator.HOME, ys.Emulator.RECENTS], str(codes))
+    check("Back / Recent apps send the right Android keys",
+          codes == [ys.Emulator.BACK, ys.Emulator.RECENTS], str(codes))
     emu.log.clear()
     move(*bar_button("power")); button(True)
 
@@ -464,8 +471,49 @@ def install_done():
 @step
 def install_open():
     check("Open starts the new app", opened == ["com.example.notes"], str(opened))
-    ctl.foreground.package = "com.google.android.apps.nexuslauncher"  # the home screen
+    ctl.foreground.package = ys.LAUNCHER_PKG  # the app closed: Android fell back to its launcher
     emu.log.clear()
+    hide_calls.clear()
+    set_active(main)
+
+@step
+def home_appears():
+    check("Android's launcher is replaced by the Yellowstacks home screen",
+          app.home is not None and app.home.visible, str(app.home and app.home.visible))
+
+@step
+def home_tiles():
+    cells = app.home.cells if app.home is not None else []
+    packages = [c[3] for c in cells]
+    check("…with a tile for each app and one more to install apps",
+          packages == [ys.GAME, "com.example.notes", None], str(packages))
+    check("the game window is put out of sight while the home screen is up",
+          ("minimise", main.id) in hide_calls and ("skip", main.id, True) in hide_calls,
+          str(hide_calls[:3]))
+    shot("home")
+    opened.clear()
+    cx, cy, _, _ = cells[1]   # the tile for Notes
+    click(app.home.c.winfo_rootx() + cx, app.home.c.winfo_rooty() + cy)
+
+@step
+def home_opens_app():
+    check("clicking a tile opens that app", opened == ["com.example.notes"], str(opened))
+    check("…and the home screen gets out of the way", not app.home.visible, str(app.home.visible))
+    check("…and the game window is brought back",
+          ("skip", main.id, False) in hide_calls, str(hide_calls[-3:]))
+    hide_calls.clear()
+    click(*bar_button("home"))
+
+@step
+def home_button():
+    check("the Home button brings the home screen back",
+          app.home is not None and app.home.visible, str(app.home and app.home.visible))
+    app.show_game()
+
+@step
+def home_hidden_again():
+    check("…and hiding it shows the game window again",
+          not app.home.visible and ("skip", main.id, False) in hide_calls, str(hide_calls[-3:]))
     set_active(main)
 
 @step
