@@ -3804,7 +3804,8 @@ class BootScreen:
         "The keyboard button on the side bar moves the game controls.",
         "Screenshots go to Pictures/Yellowstacks.",
     ]
-    SPIN = 40  # frames per turn of the ring
+    SPIN = 40    # frames per turn of the ring
+    FIND_MS = 8  # how often to look for the emulator's window before it first appears
 
     def __init__(self, root, booter, xwin, on_ready, on_cancel, on_retry):
         import tkinter as tk
@@ -3842,6 +3843,7 @@ class BootScreen:
         self.layout(w, h)
         top.after(120, lambda: self.xwin.move_resize(self.wrapper, *self.geo))  # client area exactly there
         self.animate()
+        self.watch_for_emulator()
 
     # -- where it goes
 
@@ -3984,6 +3986,16 @@ class BootScreen:
         prop = self.xwin.root.get_full_property(self.xwin.d.intern_atom("_NET_ACTIVE_WINDOW"),
                                                 self.xwin.X.AnyPropertyType)
         return prop.value[0] if prop and len(prop.value) else 0
+
+    def watch_for_emulator(self):
+        """Look for the emulator's window often until it first turns up, then leave it to
+        animate(). The window manager only lists a window once it has mapped it, so the
+        window is always on screen for a moment before we can minimise it; at the
+        animation's pace that moment was a tenth of a second, and it showed as a flash."""
+        if not self.alive or self.hidden_main is not None:
+            return
+        self.hide_emulator()
+        self.top.after(self.FIND_MS, self.watch_for_emulator)
 
     def hide_emulator(self):
         """Keep the emulator's window out of sight while Android starts: minimised and
