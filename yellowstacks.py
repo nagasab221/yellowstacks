@@ -3,8 +3,10 @@
 
 Starting: a loading screen shows where the game window will be while Android
 starts (the emulator's own window stays minimised until Android is ready), then
-Android's home screen, or an app chosen in Settings → Startup (`mlbb` opens
-Mobile Legends).
+the home screen, or an app chosen in Settings → Startup (`mlbb` opens Mobile
+Legends). The home screen is Yellowstacks' own (launcher/, installed by
+`customize`): a real Android home app that lists everything you can open, so
+Home and Recent apps behave exactly as Android means them to.
 
 Replaces the emulator's side bar with its own, docked to the game window:
   minimise / close (shuts Android down cleanly), power, volume, rotate, back,
@@ -385,7 +387,14 @@ def installed_packages():
             if line.startswith("package:")]
 
 
-LAUNCHER_ICONS = "/data/data/com.google.android.apps.nexuslauncher/databases/app_icons.db"
+LAUNCHER_PKG = "com.google.android.apps.nexuslauncher"   # Android's own home screen
+LAUNCHER_ICONS = f"/data/data/{LAUNCHER_PKG}/databases/app_icons.db"
+
+# Yellowstacks' own home screen: a real Android home app, so pressing Home really
+# does put the game in the background and Recent apps really does list it
+HOME_PKG = "com.yellowstacks.launcher"
+HOME_ACTIVITY = f"{HOME_PKG}/.HomeActivity"
+HOME_APK = HERE / "launcher" / "yellowstacks-home.apk"
 
 
 def list_apps():
@@ -1969,6 +1978,41 @@ def power_off():
 STATUS_BAR_DIMENS = ("status_bar_height_default", "status_bar_height_portrait", "status_bar_height_landscape")
 
 
+def home_screen_state():
+    """(installed, is the home app) for the Yellowstacks home screen."""
+    installed = HOME_PKG in adb_shell(f"pm list packages {HOME_PKG}")
+    current = adb_shell("cmd package resolve-activity --brief -c android.intent.category.HOME "
+                        "-a android.intent.action.MAIN")
+    return installed, HOME_PKG in current
+
+
+def install_home_screen(log=print):
+    """Put the Yellowstacks home screen on the phone and make it the home app."""
+    if not HOME_APK.exists():
+        log(f"no home screen to install at {HOME_APK} (build it with launcher/build.sh)")
+        return False
+    installed, _ = home_screen_state()
+    if not installed:
+        log("installing the Yellowstacks home screen")
+        out = subprocess.run([ADB, "install", "-r", "-g", str(HOME_APK)],
+                             capture_output=True, text=True, timeout=180)
+        if "Success" not in (out.stdout + out.stderr):
+            log(f"couldn't install it: {(out.stderr or out.stdout).strip()[:200]}")
+            return False
+    adb_shell(f"cmd package set-home-activity {HOME_ACTIVITY}")
+    log("the Yellowstacks home screen is the home app")
+    return True
+
+
+def remove_home_screen(log=print):
+    """Give Android its own launcher back."""
+    installed, _ = home_screen_state()
+    if installed:
+        subprocess.run([ADB, "uninstall", HOME_PKG], capture_output=True, timeout=120)
+    adb_shell(f"cmd package set-home-activity {LAUNCHER_PKG}/.NexusLauncherActivity")
+    log("Android's own home screen is back")
+
+
 def prepare_android():
     """Set Android up for gaming. Safe to run any time; the one step that makes
     running apps reload is skipped while the game is open (it happens next start)."""
@@ -1977,6 +2021,12 @@ def prepare_android():
     # renamed so the emulator stops turning them on; this catches older setups)
     for pkg in ("com.android.internal.emulation.pixel_6", "com.android.systemui.emulation.pixel_6"):
         sh("cmd", "overlay", "disable", pkg)
+    try:  # self-healing: a reset or a reinstall shouldn't lose the home screen
+        installed, is_home = home_screen_state()
+        if installed and not is_home:
+            sh("cmd", "package", "set-home-activity", HOME_ACTIVITY)
+    except (OSError, subprocess.SubprocessError):
+        pass
     # Empty the status bar first. Shrinking it (below) leaves its last picture frozen
     # on the home screen, so that picture must have nothing on it.
     hide_status_bar()
@@ -4244,9 +4294,11 @@ def customize_android(restore=False, log=print):
     subprocess.run([ADB, "wait-for-device"], capture_output=True, timeout=60)
     debloat_android(restore, log)
     if restore:
+        remove_home_screen(log)
         log("the look was left as it is; change it in Settings -> Android")
         return
     android_look(log)
+    install_home_screen(log)
     set_wallpaper(log)
 
 
