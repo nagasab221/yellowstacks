@@ -2032,6 +2032,13 @@ def power_off():
 
 STATUS_BAR_DIMENS = ("status_bar_height_default", "status_bar_height_portrait", "status_bar_height_landscape")
 
+# Android's gesture navigation keeps invisible swipe zones along the bottom and side
+# edges of the screen, even with no navigation bar drawn (hw.mainKeys). A mouse drag
+# that starts at the bottom of a game is a swipe up, which sends the game to the home
+# screen. The three-button mode has no edge gestures at all, and draws no bar either
+# because of hw.mainKeys. To put the gestures back, enable the "gestural" one instead.
+NAVBAR_NO_GESTURES = "com.android.internal.systemui.navbar.threebutton"
+
 
 def home_screen_state():
     """(installed, is the home app) for the Yellowstacks home screen."""
@@ -2076,6 +2083,9 @@ def prepare_android():
     # renamed so the emulator stops turning them on; this catches older setups)
     for pkg in ("com.android.internal.emulation.pixel_6", "com.android.systemui.emulation.pixel_6"):
         sh("cmd", "overlay", "disable", pkg)
+    # no edge gestures: a drag from the bottom of the screen must not leave the game
+    if f"[x] {NAVBAR_NO_GESTURES}" not in sh("cmd", "overlay", "list", "android"):
+        sh("cmd", "overlay", "enable-exclusive", "--category", NAVBAR_NO_GESTURES)
     try:  # self-healing: a reset or a reinstall shouldn't lose the home screen
         installed, is_home = home_screen_state()
         if installed and not is_home:
