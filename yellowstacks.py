@@ -268,6 +268,40 @@ def apply_avd_config(s):
     return True
 
 
+def place_emulator_window(x, y):
+    """Have the emulator open its windows at (x, y), which is under the loading screen.
+
+    The emulator reads this from the AVD's emulator-user.ini when it starts, and
+    writes its own last position back when it exits. Its windows cannot be hidden
+    before they are first drawn -- the window manager maps a window before it tells
+    anyone it exists -- so they have to open behind the loading screen, which stays
+    in front until they are out of sight (see BootScreen.keep_above).
+
+    Measured on a cold boot (2026-11-02): the window manager shows the window at a
+    place of its own choosing first -- on whichever monitor the pointer is on -- and
+    the emulator moves it here about 35 ms later, which is as much of the flash as
+    can be taken away without covering that whole monitor."""
+    path = avd_dir() / "emulator-user.ini"
+    want = {"window.x": int(x), "window.y": int(y)}
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        lines = []
+    out, seen = [], set()
+    for line in lines:
+        k = line.split("=", 1)[0].strip()
+        if k in want:
+            out.append(f"{k} = {want[k]}")
+            seen.add(k)
+        else:
+            out.append(line)
+    out += [f"{k} = {v}" for k, v in want.items() if k not in seen]
+    try:
+        path.write_text("\n".join(out) + "\n")
+    except OSError:
+        pass
+
+
 # ---------------------------------------------------------------- starting the emulator
 
 # -writable-system keeps the ARM translator that setup-avd.sh installed.
@@ -634,6 +668,10 @@ class XWindows:
 
     def activate(self, win):
         self.client_message(win, "_NET_ACTIVE_WINDOW", [2, 0, 0])
+
+    def keep_above(self, win, on):
+        self.client_message(win, "_NET_WM_STATE",
+                            [1 if on else 0, self.d.intern_atom("_NET_WM_STATE_ABOVE"), 0, 1])
 
     def set_fullscreen(self, win, on):
         self.client_message(win, "_NET_WM_STATE",
@@ -3885,6 +3923,26 @@ def glow_background(w, h, cy):
     return ImageChops.add(img, noise, 1.0, -128)
 
 
+def boot_geometry(settings, root, xwin):
+    """Where the loading screen goes: where the game window was last time (its inside),
+    else 1280x720, centred on the monitor the pointer is on."""
+    if settings.get("remember_window", True):
+        try:
+            x, y, w, h = json.loads(App.WINDOW_FILE.read_text())["geometry"]
+            if w > h >= 270:
+                return x, y, w, h
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+    px, py = root.winfo_pointerxy()
+    ax, ay, aw, ah = xwin.workarea_for(px, py)
+    w = min(1280, aw - 80)
+    h = w * 9 // 16
+    if h > ah - 100:
+        h = ah - 100
+        w = h * 16 // 9
+    return ax + (aw - w) // 2, ay + (ah - h) // 2 + 14, w, h
+
+
 class BootScreen:
     """The loading screen. It takes the game window's place while Android starts;
     the emulator's own window stays hidden until Android is ready, then appears
@@ -3903,7 +3961,7 @@ class BootScreen:
     SPIN = 40    # frames per turn of the ring
     FIND_MS = 8  # how often to look for the emulator's window before it first appears
 
-    def __init__(self, root, booter, xwin, on_ready, on_cancel, on_retry):
+    def __init__(self, root, booter, xwin, on_ready, on_cancel, on_retry, geo=None):
         import tkinter as tk
         self.tk, self.root, self.booter, self.xwin = tk, root, booter, xwin
         self.on_ready, self.on_cancel, self.on_retry = on_ready, on_cancel, on_retry
@@ -3921,12 +3979,13 @@ class BootScreen:
         self.spin_frames = {}
         self.main_seen = None
         self.hidden_main = None
+        self.above = False
         self.icon_argb = load_icon_argb()
 
         self.top = top = tk.Toplevel(root, bg=BG, class_="Yellowstacks")
         top.title(APP)
         window_icon(top)
-        self.geo = self.start_geometry()
+        self.geo = geo or self.start_geometry()
         x, y, w, h = self.geo
         top.geometry(f"{w}x{h}+{x}+{max(0, y - 30)}")
         top.minsize(480, 270)
@@ -3937,6 +3996,7 @@ class BootScreen:
         top.update_idletasks()
         self.wrapper = xwin.d.create_resource_object("window", top.winfo_id()).query_tree().parent
         self.layout(w, h)
+        self.keep_above(True)  # the emulator's windows open behind it, so nothing flashes
         top.after(120, lambda: self.xwin.move_resize(self.wrapper, *self.geo))  # client area exactly there
         self.animate()
         self.watch_for_emulator()
@@ -3944,22 +4004,7 @@ class BootScreen:
     # -- where it goes
 
     def start_geometry(self):
-        """Where the game window was last time (its inside), else 1280x720, centred."""
-        if self.booter.settings.get("remember_window", True):
-            try:
-                x, y, w, h = json.loads(App.WINDOW_FILE.read_text())["geometry"]
-                if w > h >= 270:
-                    return x, y, w, h
-            except (OSError, ValueError, KeyError, TypeError):
-                pass
-        px, py = self.root.winfo_pointerxy()
-        ax, ay, aw, ah = self.xwin.workarea_for(px, py)
-        w = min(1280, aw - 80)
-        h = w * 9 // 16
-        if h > ah - 100:
-            h = ah - 100
-            w = h * 16 // 9
-        return ax + (aw - w) // 2, ay + (ah - h) // 2 + 14, w, h
+        return boot_geometry(self.booter.settings, self.root, self.xwin)
 
     def client_geometry(self):
         return self.xwin.geometry(self.wrapper)
@@ -4083,6 +4128,25 @@ class BootScreen:
                                                 self.xwin.X.AnyPropertyType)
         return prop.value[0] if prop and len(prop.value) else 0
 
+    def keep_above(self, on):
+        """Keep the loading screen in front of every ordinary window, or stop.
+
+        A window manager maps a window before it lists it, so the emulator's windows
+        are always drawn once before anything can hide them -- that was the flash
+        (measured: the side bar for 39 ms, the game window for 67 ms). Mapped windows
+        go in the layer below a window kept above, so inside the loading screen they
+        are never on screen at all. What is left is the moment before the emulator
+        moves its window here, where the window manager first put it; covering that
+        would mean covering a whole monitor. It stops being kept above as soon as the
+        windows are out of sight, so it doesn't sit over the rest of the desktop for
+        the whole boot."""
+        if self.above != on:
+            self.above = on
+            try:
+                self.top.attributes("-topmost", on)
+            except Exception:
+                pass
+
     def watch_for_emulator(self):
         """Look for the emulator's window often until it first turns up, then leave it to
         animate(). The window manager only lists a window once it has mapped it, so the
@@ -4104,6 +4168,7 @@ class BootScreen:
                 self.main_seen = main
                 if self.hidden_main != main.id or self.xwin.geometry(main) is not None:
                     stole = self.active_window() == main.id
+                    self.keep_above(True)  # it's on screen again: get in front of it
                     self.xwin.brand(main, self.icon_argb)
                     self.xwin.skip_taskbar(main, True)
                     self.xwin.minimise(main)
@@ -4113,6 +4178,12 @@ class BootScreen:
             if bar is not None and bar.get_attributes().map_state != self.xwin.X.IsUnmapped:
                 bar.unmap()
                 self.xwin.d.flush()
+            # both windows out of sight: nothing can flash any more, so let the rest
+            # of the desktop back in front of the loading screen
+            if self.hidden_main is not None and not self.revealing \
+                    and (main is None or self.xwin.geometry(main) is None) \
+                    and (bar is None or bar.get_attributes().map_state == self.xwin.X.IsUnmapped):
+                self.keep_above(False)
         except Exception:  # a window went away while we looked
             pass
 
@@ -4122,6 +4193,7 @@ class BootScreen:
         """Android is ready: put the game window where the loading screen is and show
         it. It opens under the loading screen (or over it), which then goes away."""
         self.revealing = True
+        self.keep_above(False)  # the game window comes to the front now
         main = self.xwin.emulator()[0] or self.main_seen
         geo = self.client_geometry()
         if geo and self.booter.settings.get("remember_window", True):
@@ -4444,11 +4516,15 @@ def cmd_run(args):
         threading.Thread(target=ready, daemon=True).start()
         start_app()
     else:
+        xwin = XWindows(display.Display())
+        geo = boot_geometry(settings, root, xwin)
+        # the emulator's own windows open inside the loading screen, which covers them
+        place_emulator_window(geo[0] + 40, geo[1] + 40)
         booter = Booter(settings, open_app=args.open or settings["start_app"] or None)
         state["booter"] = booter
-        state["boot"] = BootScreen(root, booter, XWindows(display.Display()), on_ready=start_app,
+        state["boot"] = BootScreen(root, booter, xwin, on_ready=start_app,
                                    on_cancel=lambda: stop_then(root.quit),
-                                   on_retry=lambda: stop_then(start_over))
+                                   on_retry=lambda: stop_then(start_over), geo=geo)
 
     # SIGTERM/SIGINT: just quit (the launcher's `stop` does the Android shutdown);
     # SIGUSR1: shut Android down properly, same as the close button;
